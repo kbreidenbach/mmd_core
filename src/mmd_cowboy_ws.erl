@@ -1,9 +1,8 @@
 -module(mmd_cowboy_ws).
--behaviour(cowboy_http_handler).
--behaviour(cowboy_http_websocket_handler).
--export([init/3, handle/2, terminate/2]).
+-behaviour(cowboy_websocket_handler).
+-export([init/3]). %%, handle/2, terminate/3]).
 -export([websocket_init/3, websocket_handle/3,
-	 websocket_info/3, websocket_terminate/3]).
+         websocket_info/3, websocket_terminate/3]).
 
 -include("mmd_cowboy_common.hrl").
 -record(state,{chans=channel_mgr:new(),trace=true,cfg=#mmd_cfg{},xhr=false,xhr_cache,xhr_ref,type=binary}).
@@ -16,23 +15,26 @@
 				 _ -> ok
 			     end).
 
-init({_Any, http}, Req, _HttpCfg) ->
-    case cowboy_http_req:header('Upgrade', Req) of
-	{undefined, Req2} -> {ok, Req2, undefined};
-	{<<"websocket">>, _Req2} -> {upgrade, protocol, cowboy_http_websocket};
-	{<<"WebSocket">>, _Req2} -> {upgrade, protocol, cowboy_http_websocket}
-    end.
+init({tcp,http},_Req,_Opts) -> 
+    {upgrade,protocol,cowboy_websocket}.
 
-handle(Req, State) ->
-    {Path,_Req} = cowboy_http_req:raw_path(Req),
-    {ok, Req2} = cowboy_http_req:reply(401,
-				       [],
-				       [<<"Access denied, '">>,Path,<<"' only supports WebSocket connections">>],
-				       Req),
-    {ok, Req2, State}.
+%% init({_Any, http}, Req, _HttpCfg) ->
+%%     case cowboy_req:header('Upgrade', Req) of
+%% 	{undefined, Req2} -> {ok, Req2, undefined};
+%% 	{<<"websocket">>, _Req2} -> {upgrade, protocol, cowboy_http_websocket};
+%% 	{<<"WebSocket">>, _Req2} -> {upgrade, protocol, cowboy_http_websocket}
+%%     end.
 
-terminate(_Req, _State) ->
-    ok.
+%% handle(Req, State) ->
+%%     {Path,_Req} = cowboy_req:raw_path(Req),
+%%     {ok, Req2} = cowboy_req:reply(401,
+%% 				       [],
+%% 				       [<<"Access denied, '">>,Path,<<"' only supports WebSocket connections">>],
+%% 				       Req),
+%%     {ok, Req2, State}.
+
+%% terminate(_Reason, _Req, _State) ->
+%%     ok.
 
 format_addr({IP,Port}) -> p6str:ip_port_to_str(IP,Port).
 
@@ -41,39 +43,39 @@ is_set(<<"true">>) -> true;
 is_set(_Other) -> false.
 
 websocket_init(_Any, OReq, #htcfg{trace=Trace}) ->
-    {Props,Req} = cowboy_http_req:qs_vals(OReq),
+    {Props,Req} = cowboy_req:qs_vals(OReq),
     case is_set(p6props:get(<<"xhr">>,Props)) of
-	true ->
-	    UUID = p6str:mkbin(uuid:to_string(p6uuid:next())),
-	    p6dmap:addLocal(?XHR_DMAP,UUID,self()),
-	    self() ! {initXHR,UUID},
-	    XHRCache = [],
-	    XHR=true;
-	false ->
-	    XHRCache = undefined,
-	    XHR=false
+        true ->
+            UUID = p6str:mkbin(uuid:to_string(p6uuid:next())),
+            p6dmap:addLocal(?XHR_DMAP,UUID,self()),
+            self() ! {initXHR,UUID},
+            XHRCache = [],
+            XHR=true;
+        false ->
+            XHRCache = undefined,
+            XHR=false
     end,
     RespType = case is_set(p6props:get(<<"binary">>,Props)) of
-		   false -> text;
-		   true -> binary
-	       end,
-    {ok,_Transport,Socket} = ?get(transport,Req), %% Not sure if this is a stable api
+                   false -> text;
+                   true -> binary
+               end,
+    Socket = cowboy_req:get(socket,Req), %% Not sure if this is a stable api
     {Peer,_} = ?get(peer,Req),
     con_tracker:registerConnection(self(),websocket,format_addr(Peer),Socket,<<"websocket">>, json),
-    Req2 = cowboy_http_req:compact(Req),
+    Req2 = cowboy_req:compact(Req),
     {ok, Req2, #state{xhr=XHR,type=RespType,trace=Trace,xhr_cache=XHRCache}, hibernate}.
 
 websocket_handle({text, Data}, Req, State) ->
     ?trc(State,"Received(~p): ~p",[size(Data),Data]),
     case catch json_decode:decode(Data) of
-	{'EXIT',{Reason,Stack}} ->
-	    ?lerr("Error: ~p / ~p, processing: ~p",[Reason,Stack,Data]),
-	    {reply, {text, json:encode({obj,[{'_sock_error',p6str:mkio({Reason,Stack})}]})}, Req, State, hibernate};
-	Err = {error,_} ->
-	    ?lwarn("Received unparsable json text, error: ~p -- text: ~p",[Err,Data]),
-	    {reply,{text,json:encode({obj,[{'_sock_error',p6str:mkio(Err)}]})},Req,State,hibernate};
-	Msg ->
-	    process_ws(Msg,Req,State)
+        {'EXIT',{Reason,Stack}} ->
+            ?lerr("Error: ~p / ~p, processing: ~p",[Reason,Stack,Data]),
+            {reply, {text, json:encode({obj,[{'_sock_error',p6str:mkio({Reason,Stack})}]})}, Req, State, hibernate};
+        Err = {error,_} ->
+            ?lwarn("Received unparsable json text, error: ~p -- text: ~p",[Err,Data]),
+            {reply,{text,json:encode({obj,[{'_sock_error',p6str:mkio(Err)}]})},Req,State,hibernate};
+        Msg ->
+            process_ws(Msg,Req,State)
     end.
 
 %% Used for routing incoming MMD network messages back to websocket client
@@ -88,12 +90,12 @@ websocket_info({'$gen_call',Ref,Msg},Req,State) ->
 websocket_info(Down=?DOWN,Req,State=#state{chans=Chans}) ->
     ?ldebug("Chans: ~p",[Chans]),
     case channel_mgr:process_down(Chans,Down) of
-	{ok,NewChans,Messages} ->
-	    reply(Messages,Req,State),
-	    {ok,Req,State#state{chans=NewChans}};
-	{error,Other} ->
-	    ?ldebug("proc down got: ~p",[Other]),
-	    {ok,Req,State,hibernate}
+        {ok,NewChans,Messages} ->
+            reply(Messages,Req,State),
+            {ok,Req,State#state{chans=NewChans}};
+        {error,Other} ->
+            ?ldebug("proc down got: ~p",[Other]),
+            {ok,Req,State,hibernate}
     end;
 websocket_info({dispatch,Message},Req,State) ->
     ws_reply(Message,Req,State); %% {dispatch,Msg} messages are only used with websockets
@@ -121,9 +123,9 @@ handle_call(notrace,Ref,Req,State) ->
 handle_call(state,Ref,Req,State) ->
     ?gsreply(Ref,?DUMP_REC(state,State)),
     {ok,Req,State};
-handle_call(req,Ref,Req,State) ->
-    ?gsreply(Ref,?DUMP_REC(http_req,Req)),
-    {ok,Req,State};
+%% handle_call(req,Ref,Req,State) ->
+%%     ?gsreply(Ref,?DUMP_REC(http_req,Req)),
+%%     {ok,Req,State};
 handle_call(socket,Ref,Req,State) ->
     {ok,_Transport,Socket} = ?get(transport,Req),
     ?gsreply(Ref,Socket),
@@ -184,9 +186,9 @@ encode(Msg,text) -> okget:ok(json_encode:encode(Msg)).
 
 xhr_reply(Msgs,Req,State=#state{xhr_cache=Cache,xhr_ref=undefined}) ->
     Append = case is_list(Msgs) of
-		 true -> Msgs;
-		 false -> [Msgs]
-	     end,
+                 true -> Msgs;
+                 false -> [Msgs]
+             end,
     {ok,Req,State#state{xhr_cache=lists:append(Cache,Append)},hibernate};
 xhr_reply([H|Rest],Req,State=#state{type=Type,xhr_cache=Cache,xhr_ref=Ref}) ->
     ?gsreply(Ref,{Type,H}),
@@ -195,4 +197,3 @@ xhr_reply(Msg,Req,State=#state{type=Type,xhr_cache=[],xhr_ref=Ref}) ->
     ?gsreply(Ref,{Type,Msg}),
     {ok,Req,State#state{xhr_ref=undefined}}.
 
-    

@@ -12,7 +12,10 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 -module(mmd_cowboy_default).
--export([init/3, handle/2, terminate/2]).
+
+-behaviour(cowboy_http_handler).
+
+-export([init/3, handle/2, terminate/3]).
 -include("mmd_cowboy_common.hrl").
 -include_lib("kernel/include/inet.hrl").
 -define(trc(Flags,Fmt,Args), case mmd_web_flags:has(trace,Flags) of true -> ?ldebug(Fmt,Args); _ -> ok end).
@@ -21,7 +24,7 @@ init({_Proto,http}, Req, Cfg) ->
     {ok,Req,Cfg}.
 
 handle(OrigReq,Cfg) ->
-    {Path,Req} = ?get(raw_path,OrigReq),
+    {Path,Req} = ?get(path,OrigReq),
     case Path of
         <<"/_hostname">> -> ok_txt(p6str:mkbin(get_hostname(Req)),Req,Cfg);
         <<"/_p6init.js">> -> ok_js([<<"var _p6MMDVars = ">>,mk_init(Cfg,Req)],Req,Cfg);
@@ -30,11 +33,11 @@ handle(OrigReq,Cfg) ->
         _ -> handle_fs(Path,Req,Cfg)
     end.
 
-terminate(_Req,_State) -> ok.
+terminate(_Reason, _Req,_State) -> ok.
 
 redirect(OrigTo,Req,Cfg) ->
     To = re:replace(OrigTo,<<"/index\\.html">>,<<"/">>),
-    {QS,_} = ?get(raw_qs,Req),
+    {QS,_} = ?get(qs,Req),
     case QS of
         <<>> -> ToLocation = To;
         _ -> ToLocation = [To,$?,QS]
@@ -75,7 +78,7 @@ send_file(RawPath,Req,Cfg=#htcfg{root=Root}) ->
 
 maybe_send(File,Req,Cfg) ->
 						% File = p6file:join(Root,RawPath),
-    {Flags,_} = cowboy_http_req:cookie(<<"mmd">>,Req,<<>>),
+    {Flags,_} = cowboy_req:cookie(<<"mmd">>,Req,<<>>),
     case mmd_web_flags:has(raw,Flags) of
         true ->
             send_from_fs(Flags,File,Req,Cfg);
@@ -128,24 +131,24 @@ get_wsurl(_Req,#htcfg{port=Port}) ->
 
 
 not_found(Req,Cfg) ->
-    {Raw,_} = ?get(raw_path,Req),
+    {Raw,_} = ?get(path,Req),
     reply(404,[],p6str:mkbin("File not found: ~s",[Raw]),Req,Cfg).
 
 ok_js(Body,Req,Cfg)-> reply(200,[{<<"Content-Type">>,<<"application/javascript">>}],Body,Req,Cfg).
 ok_txt(Body,Req,Cfg) -> reply(200,[{<<"Content-Type">>,<<"text/plain">>}],Body,Req,Cfg).
 
 reply(RC,Headers,Body,Req,Cfg) ->
-    {ok,NewReq} = cowboy_http_req:reply(RC,Headers,Body,Req),
+    {ok,NewReq} = cowboy_req:reply(RC,Headers,Body,Req),
     {ok,NewReq,Cfg}.
 
 get_hostname(Req) ->
-    {IP,_} = ?get(peer_addr,Req),
+    {{IP,_Port},_} = ?get(peer,Req),
     case inet:gethostbyaddr(IP) of
-	{ok,#hostent{h_name=undefined}} -> ?lwarn("Failed to resolve name for: ~p",[IP]),
-					   p6str:ip_to_str(IP);
-	{ok,#hostent{h_name=Name}} -> Name;
-	Other -> ?lwarn("Failed to resolve hostname for: ~p, result: ~p",[IP,Other]),
-		 p6str:ip_to_str(IP)
+        {ok,#hostent{h_name=undefined}} -> ?lwarn("Failed to resolve name for: ~p",[IP]),
+                                           p6str:ip_to_str(IP);
+        {ok,#hostent{h_name=Name}} -> Name;
+        Other -> ?lwarn("Failed to resolve hostname for: ~p, result: ~p",[IP,Other]),
+                 p6str:ip_to_str(IP)
     end.
 
 %% Returns content of a file or an empty binary, used for optional includes from filesystem
