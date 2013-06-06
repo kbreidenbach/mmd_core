@@ -27,6 +27,7 @@ compile:
 deps:
 	$(REBAR) get-deps
 	$(REBAR) update-deps
+	test -f scontrol || ln -s deps/p6core/priv/bin/scontrol
 
 test: compile
 	$(REBAR) eunit
