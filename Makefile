@@ -14,10 +14,7 @@ shell: compile
 	$(ERL)
 
 mmd: compile
-	deps/p6core/priv/scontrol -e dev -a mmd_core -c example/mmd.cfg  debug
-
-mmd2: compile
-	deps/p6core/priv/scontrol -e dev -a mmd_core -n mmd2_core -c example/mmd2.cfg  debug
+	./scontrol -e dev debug
 
 compile:
 	$(REBAR) compile
@@ -27,6 +24,7 @@ compile:
 deps:
 	$(REBAR) get-deps
 	$(REBAR) update-deps
+	test -f scontrol || ln -s deps/p6core/priv/bin/scontrol
 
 test: compile
 	$(REBAR) eunit
