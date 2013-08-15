@@ -1,4 +1,8 @@
 -include_lib("p6core/include/p6core.hrl").
+
+-define(SERVICE_VERSION,1).
+-record(service,{node,name,app,enabled=true,tags,pid,version=?SERVICE_VERSION}).
+
 -define(EXIT_ERROR,1).
 -define(EXIT_RESTART,2).
 
@@ -7,7 +11,6 @@
 -define(CODEC_MINOR,0).
 -define(CODEC_VERSION,<<?CODEC_MAJOR:8,?CODEC_MINOR:8>>).
 
--define(MAX_CONCURRENT_CHANNELS,0). % 0 mean unlimited
 -define(CHANNEL_DISPATCH_TIMEOUT,300000). %% 5 minutes
 -define(NO_AUTH,<<0:128>>).
 
@@ -23,7 +26,7 @@
 -type body() :: {mmd_raw,binary()} | term().
 
 %% Channel messages
--record(channel_create,{id=uuid:srandom() :: channelId(),
+-record(channel_create,{id=p6uuid:next() :: channelId(),
                         originator=self() :: pid(),
                         service :: serviceName(),
                         type :: createType(),
@@ -81,6 +84,12 @@
 -define(TIMEOUT,10).
 -define(SERVICE_BUSY,11).
 
+-define(DOUBLE_NAN,<<16#7F,16#F8,0,0,0,0,0,0>>).
+-define(DOUBLE_INF,<<16#7F,16#F0,0,0,0,0,0,0>>).
+-define(DOUBLE_NEGINF,<<16#FF,16#F0,0,0,0,0,0,0>>).
+-define(INFINITY,'Infinity').
+-define(NEGINFINITY,'-Infinity').
+-define(NAN,'NaN').
 
 %% See protocol.txt for details of these
 %% Message Types

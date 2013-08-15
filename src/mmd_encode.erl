@@ -46,6 +46,12 @@ encode_obj(?secid(Data)) ->
     [?SECID,encode_type(secid,Data)];
 encode_obj(?time(Data)) ->
     [?VARINT_TIME,encode_type(date,Data)];
+encode_obj(?NAN) ->
+    [?DOUBLE,?DOUBLE_NAN];
+encode_obj(?INFINITY) ->
+    [?DOUBLE,?DOUBLE_INF];
+encode_obj(?NEGINFINITY) ->
+    [?DOUBLE,?DOUBLE_NEGINF];
 %% exact types
 encode_obj(true) -> [?TRUE];
 encode_obj(false) -> [?FALSE];
@@ -53,6 +59,8 @@ encode_obj(undefined) -> [?NULL];
 encode_obj(null) -> [?NULL];
 encode_obj(nil) -> [?NULL];
 %% inferred types
+encode_obj(Obj) when is_pid(Obj) ->
+    encode_obj(p6str:mkbin(Obj));
 encode_obj(Obj) when is_integer(Obj), Obj < 0 ->
     [?SVARINT64,encode_type(svarint64,Obj)];
 encode_obj(Obj) when is_integer(Obj) ->

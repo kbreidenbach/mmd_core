@@ -6,3 +6,7 @@ logs
 gproc*@*
 .eunit/
 doc/
+*.pyc
+*#
+scontrol
+

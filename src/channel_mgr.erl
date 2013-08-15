@@ -14,7 +14,7 @@
 -module(channel_mgr).
 -include("mmd.hrl").
 -include_lib("p6core/include/logger.hrl").
--export([new/0, new/1]).
+-export([new/0]).
 -export([handleExit/3, process_local/2, process_local/3, process_local/4]).
 -export([process_local_set_data/3, process_local_set_data/4]).
 -export([process_remote/3, process_remote/4, process_remote_get_data/3]).
@@ -24,18 +24,15 @@
 -export([close_all/2]).
 -export([chan_count/1]).
 
--record(state, {tid, max_chans}).
+-record(state, {tid}).
 -define(tid(S), S#state.tid).
--define(max_chans(S), S#state.max_chans).
 
--record(chan, {id='_', remote='_', data='_', ref='_'}).
+-record(chan, {id='_', svc='_', remote='_', data='_', ref='_'}).
 
-new() -> new(?MAX_CONCURRENT_CHANNELS).
-new(MaxChans) -> #state{tid = ets:new(channel_mgr, [set, {keypos, 2}]),
-			max_chans = MaxChans}.
+new() -> #state{tid = ets:new(channel_mgr, [set, {keypos, 2}])}.
 chan_count(State) ->
     ets:info(?tid(State),size).
-    
+
 close_all(State,Body) ->
     ets:foldl(fun(#chan{id=Id,remote=Pid,ref=Ref},S) ->
 		      demonitor(Ref),
@@ -81,23 +78,22 @@ process_down(State,{'DOWN',_Ref,process,Pid,Reason}) ->
 			Channels)}
     end.
 
+
 %% a local channel_create will spawn a channel process that will
 %% dispatch the message for us.
 process_local(State, M) -> process_local(State, M, undefined).
 process_local(State, M, Cfg) -> process_local(State, M, Cfg, undefined).
-process_local(State=#state{tid=Tid,max_chans=MaxChans}, M=#channel_create{id=Id}, Cfg, Data) ->
-    case MaxChans =/= 0 andalso ets:info(Tid, size) > MaxChans of
-	true -> {State, maxChans(Id, MaxChans)};
-	false ->
+process_local(State=#state{tid=Tid}, M=#channel_create{id=Id, service=Svc}, Cfg, Data) ->
+    case ets:lookup(Tid,Id) of
+	[] ->
 	    {ok,Pid} = client_channel:new(self(),M,Cfg),
 	    Ref = monitor(process,Pid),
-	    case ets:insert_new(Tid,
-				#chan{id = Id, remote = Pid, data = Data, ref = Ref}) of
-		true -> {State, []};
-		false ->
-		    demonitor(Ref,[flush]),
-		    {State, dupId(Id)}
-	    end
+	    NewEntry = #chan{id = Id, remote = Pid, data = Data, ref = Ref, svc=Svc},
+	    true = ets:insert_new(Tid, NewEntry),
+	    {State,[]};
+	Other ->
+	    ?lerr("Client attempted to create a duplicate chanel ID\n\tMessage: ~p\n\tCurrent entry: ~p",[M,Other]),
+	    exit({error,duplicate_channel_id})
     end;
 
 process_local(State, M=#channel_message{id=Id}, _Cfg, _Data) ->
@@ -127,25 +123,29 @@ process_local_set_data(State, M=#channel_message{id=Id}, _Cfg, Data) ->
     case ets:lookup(?tid(State), Id) of
         [] -> {State, noSuchChannel(Id)};
         [Ch = #chan{remote = Pid}] -> fire(Pid,M),
-	       ets:insert(?tid(State), Ch#chan{data = Data}),
-	       {State, []}
+				      ets:insert(?tid(State), Ch#chan{data = Data}),
+				      {State, []}
     end.
 
 process_remote(State, From, M) -> process_remote(State, From, M, undefined).
-process_remote(State, From, M=#channel_create{id=Id}, Data) ->
+process_remote(State=#state{tid=Tid}, From, M=#channel_create{id=Id, service=Svc}, Data) ->
     Ref = monitor(process,From),
-    case ets:insert_new(?tid(State),
-			#chan{id = Id, remote = From, data=Data,ref=Ref}) of
-        true -> {State, M};
-        false -> dupId(From,Id),
-                State
+    Entry = #chan{id = Id, remote = From, data=Data,ref=Ref,svc=Svc},
+    case ets:insert_new(Tid,Entry) of
+        true -> 
+	    {State, M};
+        false -> 
+	    demonitor(Ref,[flush]),
+	    ?lerr("Remote duplicate channel id detected\n\tIncoming message: ~p\n\tCurrent entry: ~p\n\tDuplicate entry: ~p",[M,ets:lookup(Tid,Id),Entry]),
+	    mmd_msg:error(From,M,?INVALID_CHANNEL,<<"Server detected a duplicate channel ID">>),
+	    {State,[]}
     end;
 
 process_remote(State, From, M=#channel_message{id=Id}, _Data) ->
     case ets:member(?tid(State), Id) of
         false ->
             ?lwarn("Unknown channel: ~p from: ~p",[Id,From]),
-            State;
+            {State,[]};
         true -> {State, M}
     end;
 process_remote(State,_From,M=#channel_close{id=Id}, _Data) ->
@@ -186,12 +186,8 @@ removeRef(State, Ref) ->
     ets:match_delete(?tid(State), [#chan{remote = Ref, _ = '_'}]),
     State.
 
-maxChans(Id, MaxChans) ->
-    err(Id, ?INVALID_CHANNEL,
-	"Maximum channels per connection (~p) reached", [MaxChans]).
-
-dupId(From,Id) -> fire(From,dupId(Id)).
-dupId(Id) -> err(Id,?INVALID_CHANNEL,<<"Duplicate channel id detected.">>).
+%% dupId(From,Id) -> fire(From,dupId(Id)).
+%% dupId(Id) -> err(Id,?INVALID_CHANNEL,<<"Duplicate channel id detected.">>).
 
 unexpectedClose(Id) ->
     selfError(Id,?UNEXPECTED_REMOTE_CHANNEL_CLOSE,<<"Connection to the remote channel was lost.">>).
@@ -202,5 +198,5 @@ noSuchChannel(Id) ->
 selfError(Id,Code,Msg) ->
     err(Id,Code,Msg).
 
-err(Id,Code,Format,Args) -> err(Id,Code,p6str:mkbin(Format,Args)).
+%%err(Id,Code,Format,Args) -> err(Id,Code,p6str:mkbin(Format,Args)).
 err(Id,Code,Body) -> #channel_close{id=Id,body=?error(Code,Body)}.

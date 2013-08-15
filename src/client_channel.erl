@@ -95,17 +95,24 @@ handle_info({'DOWN',_Ref,process,Remote,Reason},#state{remote=Remote,owner=Owner
 			      body=?error(?UNEXPECTED_REMOTE_CHANNEL_CLOSE,
 					  "Service failed with: ~p",[Reason])}),
     {stop,normal,nostate};
+
+handle_info({'DOWN',_Ref,process,Owner,Reason},#state{owner=Owner,remote=Remote,id=Id,type=call,svc=Svc}) ->
+    ?lwarn("Channel: ~p, Owner (~p) died while waiting for a call to: ~p (~p) to return: ~p",[Id,Owner,Svc,Remote,Reason]),
+    {stop,normal,nostate};
+
 handle_info({'DOWN',_Ref,process,Owner,_Reason},#state{owner=Owner,remote=Remote,id=Id}) ->
     fire(Remote,#channel_close{id=Id,body=?error(?UNEXPECTED_REMOTE_CHANNEL_CLOSE,
                                             <<"Connection to the remote channel was lost.">>)}),
     {stop,normal,nostate};
 
+handle_info(M={mmd,From,#channel_close{}}, #state{owner=From,type=call,remote=Remote,svc=Svc}) ->
+    ?lwarn("Dropping close channel to: ~p (~p) from client (~p) side of call, msg: ~p",[Svc,Remote,From,M]),
+    {stop,normal,nostate};
 handle_info({mmd,From,CC=#channel_close{}}, State) ->
-    fire(resolveDest(From,logTime(From,CC,State)),CC),
+    fire(resolveDest(From,State),CC),
     {stop,normal,nostate};
 
-handle_info({mmd,From,Msg}, OState) ->
-    State = logTime(From,Msg,OState),
+handle_info({mmd,From,Msg}, State) ->
     fire(resolveDest(From,State),Msg),
     {noreply,State};
 
@@ -121,23 +128,8 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-logTime(_,_,State) -> State.
-% logTime(From,Msg,State=#state{svc=Svc,lastTime=LT,remote=Remote,id=Id}) ->
-%     Type = element(1,Msg),
-%     NT = p6time:nowAs(ms),
-%     Who = case From of
-% 	      Remote -> service;
-% 	      _ -> client
-% 	  end,
-%     case LT of
-% 	undefined -> ?linfo("Created: ~p",[Id]);
-% 	_ -> ?linfo("svc: ~p, type: ~p, from: ~p, time: ~p, chan: ~p",[Svc,Type,Who,NT-LT,Id])
-%     end,
-%     State#state{lastTime=NT}.
-    
 resolveDest(From,#state{owner=From,remote=R}) -> R;
 resolveDest(From,#state{owner=O,remote=From}) -> O;
-resolveDest(From,#state{owner=O,remote={mod,_}}) when From == self() -> O;
 resolveDest(From,State) -> ?lwarn("Can't resolve: ~p -> ~p",[From,State]), error({bad_state,From,State}).
 
 
@@ -156,22 +148,22 @@ nextTimeout(Create=#create{owner=Owner,createTime=CT,remote=RPid,msg=#channel_cr
 
 
 
-initChannel(Create=#create{owner=Owner,msg=CC=#channel_create{id=Id,service=Svc},remote=Pid}) when is_pid(Pid) ->
+initChannel(Create=#create{owner=Owner,msg=CC=#channel_create{type=ChanType,id=Id,service=Svc},remote=Pid}) when is_pid(Pid) ->
     Service = p6str:to_lower_bin(Svc),
     CCProper = CC#channel_create{service=Service},
     case fire(Pid,CCProper) of
         {ok,NewPid} when is_pid(NewPid) ->
 	    monitor(process,NewPid),
             create_tracker:incr(Service),
-            {noreply,#state{owner=Owner,remote=NewPid,id=Id,type=client,svc=Service}};
+            {noreply,#state{owner=Owner,remote=NewPid,id=Id,type=ChanType,svc=Service}};
         Other -> ?lwarn("Failed to setup directed channel to: ~p, reason: ~p",[Pid,Other]),
                  nextTimeout(Create#create{msg=CCProper})
     end;
 
-initChannel(Create=#create{mmdCfg=MMDCfg,owner=Owner,msg=CC=#channel_create{service=Svc,id=Id}}) ->
+initChannel(Create=#create{mmdCfg=MMDCfg,owner=Owner,msg=CC=#channel_create{type=ChanType,service=Svc,id=Id}}) ->
     Service = p6str:to_lower_bin(Svc),
     CCProper = CC#channel_create{service=Service},
-    case services:findBalanced(Service) of
+    case services:findBalanced(Service,Owner) of
         [] ->
             fire(Owner,#channel_close{id=Id,body=?error(?SERVICE_NOT_FOUND,"Service '~p' not found.",[Svc])}),
             ?linfo("~p asked for non-existent service: ~p",[Owner,Svc]),
@@ -190,7 +182,7 @@ initChannel(Create=#create{mmdCfg=MMDCfg,owner=Owner,msg=CC=#channel_create{serv
                                     fire(Owner,#channel_message{id=Id,body= <<"$ack$">>})
                             end
                     end,
-                    {noreply,logTime(Owner,CCProper,#state{owner=Owner,remote=Pid,id=Id,type=client,svc=Service})};
+                    {noreply,#state{owner=Owner,remote=Pid,id=Id,type=ChanType,svc=Service}};
                 {error,retry} -> nextTimeout(Create#create{msg=CCProper});
                 Other -> ?lwarn("Failed to create channel, reason: ~p, targets: ~p",[Other,Entries]),
                          fire(Owner,#channel_close{id=Id,body=?error(?SERVICE_ERROR,"Service '~p' failure: ~p",[Service,Other])}),
@@ -200,7 +192,7 @@ initChannel(Create=#create{mmdCfg=MMDCfg,owner=Owner,msg=CC=#channel_create{serv
 
 fire([],_Msg) ->
     {error,all_bad};
-fire([[_,Pid,_]|Pids], M)->
+fire([#service{pid=Pid}|Pids], M)->
     case fire(Pid,M) of
         {ok,SvcPid} ->
 	    {ok,SvcPid};
@@ -212,7 +204,7 @@ fire([[_,Pid,_]|Pids], M)->
 
 fire(undefined,M) -> ?lerr("Unable to send message to 'undefined': ~p",[M]),
                      {error,bad_pid};
-
+fire(#service{pid=Pid},M) -> fire(Pid,M);
 fire(Pid,Msg) when is_pid(Pid) ->
     case catch gen_server:call(Pid,{mmd,self(),Msg},?CHANNEL_DISPATCH_TIMEOUT) of
         ok -> {ok,Pid};
